@@ -13,7 +13,7 @@ Open-Meteo API + 気象庁API(警報)のダブルチェックで降水を検知�
   GMAIL_USER         : 送信用Gmailアドレス
   GMAIL_APP_PASSWORD : Gmailアプリパスワード (16桁)
   MAIL_TO            : hironart@amazon.com
-  MAIL_CC            :
+  MAIL_CC            :""
 """
 
 import json
