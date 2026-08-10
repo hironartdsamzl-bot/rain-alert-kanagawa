@@ -1,0 +1,38 @@
+name: Rain Alert Monitor
+
+on:
+  schedule:
+    - cron: '0,30 22,23,0,1,2,3,4,5,6,7,8,9,10 * * *'
+  workflow_dispatch:
+
+jobs:
+  rain-check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    steps:
+      - name: リポジトリをチェックアウト
+        uses: actions/checkout@v4
+
+      - name: クールダウン状態を復元
+        uses: actions/cache/restore@v4
+        with:
+          path: .cooldown_state
+          key: rain-alert-cooldown-latest
+          restore-keys: |
+            rain-alert-cooldown-
+
+      - name: Rain Alert を実行
+        env:
+          GMAIL_USER:         ${{ secrets.GMAIL_USER }}
+          GMAIL_APP_PASSWORD: ${{ secrets.GMAIL_APP_PASSWORD }}
+          MAIL_TO:            ${{ secrets.MAIL_TO }}
+          MAIL_CC:            ${{ secrets.MAIL_CC }}
+        run: python rain_alert.py
+
+      - name: クールダウン状態を保存
+        uses: actions/cache/save@v4
+        if: always()
+        with:
+          path: .cooldown_state
+          key: rain-alert-cooldown-${{ github.run_id }}
