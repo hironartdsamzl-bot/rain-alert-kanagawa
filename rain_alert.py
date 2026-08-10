@@ -60,7 +60,7 @@ JMA_WARNING_CODES = {
 JMA_WARNING_TRIGGER_CODES = {"03", "04", "05", "10", "11", "12"}
 JMA_ADVISORY_CODES        = {"15", "20", "22"}
 
-HOURLY_RAIN_THRESHOLD = 20.0  # mm/h
+HOURLY_RAIN_THRESHOLD = 10.0  # mm/h
 COOLDOWN_MINUTES      = 25
 COOLDOWN_FILE         = Path(".cooldown_state")
 
