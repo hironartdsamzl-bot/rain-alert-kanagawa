@@ -55,8 +55,8 @@ JMA_WARNING_TRIGGER_CODES = {"03", "04", "05", "10", "11", "12"}
 JMA_ADVISORY_CODES        = {"15", "20", "22"}
 
 # テスト用: 0.0 → 本番時は 10.0 に変更すること
-HOURLY_RAIN_THRESHOLD = 20.0  # mm/h
-COOLDOWN_MINUTES      = 25
+HOURLY_RAIN_THRESHOLD = 0.0  # mm/h
+COOLDOWN_MINUTES      = 20
 COOLDOWN_FILE         = Path(".cooldown_state")
 
 # ==============================================================
@@ -170,10 +170,14 @@ def format_alert(alert: str) -> str:
         if label in alert:
             alert = alert.replace(label, emoji)
             break
-    # ピーク時刻を短縮: 2026-08-12T16:15 → 16:15
-    alert = re.sub(r'\d{4}-\d{2}-\d{2}T(\d{2}:\d{2})', r'\1', alert)
     # 最大15分値を削除
     alert = re.sub(r'  最大15分値: [\d.]+mm', '', alert)
+    # 降水量が0.0の場合はピーク時刻も削除
+    if "0.0mm/h" in alert:
+        alert = re.sub(r'  ピーク: [\d:T\-]+', '', alert)
+    else:
+        # ピーク時刻を短縮: 2026-08-12T16:15 → 16:15
+        alert = re.sub(r'\d{4}-\d{2}-\d{2}T(\d{2}:\d{2})', r'\1', alert)
     return alert
 
 
