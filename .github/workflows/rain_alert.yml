@@ -14,27 +14,26 @@ jobs:
       - name: リポジトリをチェックアウト
         uses: actions/checkout@v4
 
-      - name: クールダウン状態を復元
+      - name: 前回状態を復元
         uses: actions/cache/restore@v4
         with:
-          path: .cooldown_state
-          key: rain-alert-cooldown-latest
+          path: .rain_state
+          key: rain-alert-state-latest
           restore-keys: |
-            rain-alert-cooldown-
+            rain-alert-state-
 
       - name: Rain Alert を実行
         env:
+          SLACK_WEBHOOK_URL:  ${{ secrets.SLACK_WEBHOOK_URL }}
           GMAIL_USER:         ${{ secrets.GMAIL_USER }}
           GMAIL_APP_PASSWORD: ${{ secrets.GMAIL_APP_PASSWORD }}
           MAIL_TO:            ${{ secrets.MAIL_TO }}
           MAIL_CC:            ${{ secrets.MAIL_CC }}
-          SLACK_WEBHOOK_URL:  ${{ secrets.SLACK_WEBHOOK_URL }}
-
         run: python rain_alert.py
 
-      - name: クールダウン状態を保存
+      - name: 状態を保存
         uses: actions/cache/save@v4
         if: always()
         with:
-          path: .cooldown_state
-          key: rain-alert-cooldown-${{ github.run_id }}
+          path: .rain_state
+          key: rain-alert-state-${{ github.run_id }}
