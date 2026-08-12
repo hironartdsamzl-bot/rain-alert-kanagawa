@@ -15,6 +15,7 @@ Open-Meteo API + 気象庁API(警報)のダブルチェックで降水を検知�
 
 import json
 import os
+import re
 import time
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
@@ -157,19 +158,40 @@ def check_jma_warnings(data: dict) -> tuple:
 # Slack 通知（Workflow Builder Webhook）
 # ==============================================================
 
+def format_alert(alert: str) -> str:
+    emoji_map = {
+        "[やや強い雨  ]": ":rain_cloud:",
+        "[強い雨      ]": ":rain_cloud::rain_cloud:",
+        "[激しい雨    ]": ":thunder_cloud_and_rain:",
+        "[非常に激しい雨]": ":thunder_cloud_and_rain::thunder_cloud_and_rain:",
+        "[猛烈な雨    ]": ":rotating_light:",
+    }
+    for label, emoji in emoji_map.items():
+        if label in alert:
+            alert = alert.replace(label, emoji)
+            break
+    # ピーク時刻を短縮: 2026-08-12T16:15 → 16:15
+    alert = re.sub(r'\d{4}-\d{2}-\d{2}T(\d{2}:\d{2})', r'\1', alert)
+    # 最大15分値を削除
+    alert = re.sub(r'  最大15分値: [\d.]+mm', '', alert)
+    return alert
+
+
 def send_slack(trigger_alerts: list, log_only_info: list) -> bool:
     webhook_url = os.environ.get("SLACK_WEBHOOK_URL", "")
     if not webhook_url:
         print("SLACK_WEBHOOK_URL 未設定 — Slack通知スキップ")
         return False
 
-    now = datetime.now(JST).strftime("%Y/%m/%d %H:%M")
-    alert_lines = "\n".join(f"• {a}" for a in trigger_alerts)
+    now = datetime.now(JST).strftime("%m/%d %H:%M")
+    alert_lines = "\n".join(f"• {format_alert(a)}" for a in trigger_alerts)
+
     message = (
-        f":rain_cloud: *【Rain Alert】強雨検知 {now}*\n"
-        f"監視拠点: 神奈川9拠点（DEJ3/OEJE/DEJ6/DEJ9/DTK8/PEJ6/OEJW/OEJT/OEJU）\n"
-        f"\n{alert_lines}\n"
-        f"\n_Open-Meteo / 気象庁データに基づく自動通知_"
+        f":rotating_light: *【Rain Alert】強雨検知　{now}*\n"
+        f"━━━━━━━━━━━━━━━━━━━━\n"
+        f"{alert_lines}\n"
+        f"━━━━━━━━━━━━━━━━━━━━\n"
+        f"_神奈川9拠点監視 | Open-Meteo / 気象庁_"
     )
 
     payload = {"Text": message}
