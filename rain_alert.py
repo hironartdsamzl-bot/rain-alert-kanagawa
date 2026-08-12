@@ -55,7 +55,7 @@ JMA_WARNING_CODES = {
 JMA_WARNING_TRIGGER_CODES = {"03", "04", "05", "10", "11", "12"}
 JMA_ADVISORY_CODES        = {"15", "20", "22"}
 
-HOURLY_RAIN_THRESHOLD = 00.0  # mm/h（本番値）
+HOURLY_RAIN_THRESHOLD = 10.0  # mm/h（本番値）
 COOLDOWN_MINUTES      = 10    # 差分なしでも連続投稿を防ぐ最低間隔（差分検知が主制御）
 STATE_FILE            = Path(".rain_state")  # 状態ファイル（クールダウン + 前回拠点状態）
 
