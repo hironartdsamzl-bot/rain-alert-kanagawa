@@ -159,24 +159,31 @@ def check_jma_warnings(data: dict) -> tuple:
 # ==============================================================
 
 def format_alert(alert: str) -> str:
-    emoji_map = {
-        "[やや強い雨  ]": ":rain_cloud:",
-        "[強い雨      ]": ":rain_cloud::rain_cloud:",
-        "[激しい雨    ]": ":thunder_cloud_and_rain:",
-        "[非常に激しい雨]": ":thunder_cloud_and_rain::thunder_cloud_and_rain:",
-        "[猛烈な雨    ]": ":rotating_light:",
-    }
-    for label, emoji in emoji_map.items():
-        if label in alert:
-            alert = alert.replace(label, emoji)
-            break
+    # mm/h の実値を取り出して絵文字を決定
+    match = re.search(r'([\d.]+)mm/h', alert)
+    mmh = float(match.group(1)) if match else 0.0
+
+    if mmh == 0.0:
+        emoji = ":cloud:"
+    elif mmh < 5.0:
+        emoji = ":rain_cloud:"
+    elif mmh < 10.0:
+        emoji = ":rain_cloud::rain_cloud:"
+    elif mmh < 20.0:
+        emoji = ":thunder_cloud_and_rain:"
+    elif mmh < 30.0:
+        emoji = ":thunder_cloud_and_rain::thunder_cloud_and_rain:"
+    else:
+        emoji = ":rotating_light:"
+
+    # レベルラベルを絵文字に置換
+    alert = re.sub(r'\[.*?\]', emoji, alert)
     # 最大15分値を削除
     alert = re.sub(r'  最大15分値: [\d.]+mm', '', alert)
     # 降水量が0.0の場合はピーク時刻も削除
     if "0.0mm/h" in alert:
         alert = re.sub(r'  ピーク: [\d:T\-]+', '', alert)
     else:
-        # ピーク時刻を短縮: 2026-08-12T16:15 → 16:15
         alert = re.sub(r'\d{4}-\d{2}-\d{2}T(\d{2}:\d{2})', r'\1', alert)
     return alert
 
@@ -188,10 +195,27 @@ def send_slack(trigger_alerts: list, log_only_info: list) -> bool:
         return False
 
     now = datetime.now(JST).strftime("%m/%d %H:%M")
+
+    # 最大雨量からヘッダー絵文字を決定
+    max_mmh = 0.0
+    for a in trigger_alerts:
+        m = re.search(r'([\d.]+)mm/h', a)
+        if m:
+            max_mmh = max(max_mmh, float(m.group(1)))
+
+    if max_mmh >= 30.0:
+        header_emoji = ":rotating_light:"
+    elif max_mmh >= 10.0:
+        header_emoji = ":thunder_cloud_and_rain:"
+    elif max_mmh >= 5.0:
+        header_emoji = ":rain_cloud::rain_cloud:"
+    else:
+        header_emoji = ":rain_cloud:"
+
     alert_lines = "\n".join(f"• {format_alert(a)}" for a in trigger_alerts)
 
     message = (
-        f":rotating_light: *【Rain Alert】強雨検知　{now}*\n"
+        f"{header_emoji} *【Rain Alert】強雨検知　{now}*\n"
         f"━━━━━━━━━━━━━━━━━━━━\n"
         f"{alert_lines}\n"
         f"━━━━━━━━━━━━━━━━━━━━\n"
