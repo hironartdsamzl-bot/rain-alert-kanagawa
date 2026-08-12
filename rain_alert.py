@@ -2,30 +2,23 @@
 Rain Alert Monitor - GitHub Actions版
 ================================================
 Open-Meteo API + 気象庁API(警報)のダブルチェックで降水を検知し、
-閾値を超えた場合にチームおよび全DSP各社へメールを一斉送信する。
+閾値を超えた場合にSlack Workflow Builder経由でチャンネルへ通知する。
 
 実行環境  : GitHub Actions (ubuntu-latest)
-スケジュール: 30分間隔 (07:00-20:00 JST) ← workflow.ymlで設定
-メール送信 : smtplib + Gmail SMTP
+スケジュール: 10分間隔 (07:00-20:00 JST) ← workflow.ymlで設定
+通知      : Slack Workflow Builder Webhook
 クールダウン: .cooldown_state ファイル（GitHub Actions キャッシュで管理）
 
 【必要なGitHub Secrets】
-  GMAIL_USER         : 送信用Gmailアドレス
-  GMAIL_APP_PASSWORD : Gmailアプリパスワード (16桁)
-  MAIL_TO            : hironart@amazon.com
-  MAIL_CC            :""
+  SLACK_WEBHOOK_URL : Slack Workflow Builder の Webhook URL
 """
 
 import json
 import os
 import time
-import smtplib
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
 from urllib.request import urlopen, Request
-from urllib.error import URLError, HTTPError
-from email.mime.text import MIMEText
-from email.mime.multipart import MIMEMultipart
 
 JST = timezone(timedelta(hours=9))
 
@@ -60,17 +53,10 @@ JMA_WARNING_CODES = {
 JMA_WARNING_TRIGGER_CODES = {"03", "04", "05", "10", "11", "12"}
 JMA_ADVISORY_CODES        = {"15", "20", "22"}
 
+# テスト用: 0.0 → 本番時は 10.0 に変更すること
 HOURLY_RAIN_THRESHOLD = 0.0  # mm/h
 COOLDOWN_MINUTES      = 25
 COOLDOWN_FILE         = Path(".cooldown_state")
-
-# ==============================================================
-# 送信先（全DSP 73アドレス / BCC）
-# ==============================================================
-
-BCC_LIST = [
-]
-
 
 # ==============================================================
 # クールダウン管理（ファイルベース）
@@ -168,66 +154,34 @@ def check_jma_warnings(data: dict) -> tuple:
     return len(warning_alerts) > 0, warning_alerts, advisory_alerts
 
 # ==============================================================
-# メール送信
+# Slack 通知（Workflow Builder Webhook）
 # ==============================================================
 
-def build_email_body(trigger_alerts: list, log_only_info: list) -> str:
+def send_slack(trigger_alerts: list, log_only_info: list) -> bool:
+    webhook_url = os.environ.get("SLACK_WEBHOOK_URL", "")
+    if not webhook_url:
+        print("SLACK_WEBHOOK_URL 未設定 — Slack通知スキップ")
+        return False
+
     now = datetime.now(JST).strftime("%Y/%m/%d %H:%M")
-    lines = [
-        "お疲れ様です。",
-        "Rain Alert システムより強雨検知の自動通知をお送りします。",
-        "",
-        f"  検知時刻 : {now}",
-        f"  監視拠点 : 神奈川 9拠点（DEJ3/OEJE/DEJ6/DEJ9/DTK8/PEJ6/OEJW/OEJT/OEJU）",
-        "",
-        "=" * 48,
-        "【検知アラート】",
-        "=" * 48,
-    ]
-    for alert in trigger_alerts:
-        lines.append(f"  {alert}")
-    if log_only_info:
-        lines += ["", "【参考: 閾値未満拠点（ログのみ）】"]
-        for info in log_only_info[:5]:
-            lines.append(f"  {info}")
-    lines += [
-        "",
-        "※ Open-Meteo / 気象庁データに基づく自動通知です。",
-        "※ 最新状況は各種気象サービスでもご確認ください。",
-        "",
-        "─" * 48,
-        "Rain Alert Monitor | Kanagawa Field Operations",
-        "─" * 48,
-    ]
-    return "\n".join(lines)
+    alert_lines = "\n".join(f"• {a}" for a in trigger_alerts)
+    message = (
+        f":rain_cloud: *【Rain Alert】強雨検知 {now}*\n"
+        f"監視拠点: 神奈川9拠点（DEJ3/OEJE/DEJ6/DEJ9/DTK8/PEJ6/OEJW/OEJT/OEJU）\n"
+        f"\n{alert_lines}\n"
+        f"\n_Open-Meteo / 気象庁データに基づく自動通知_"
+    )
 
-
-def send_email(subject: str, body: str) -> bool:
-    gmail_user     = os.environ["GMAIL_USER"]
-    gmail_password = os.environ["GMAIL_APP_PASSWORD"]
-    mail_to        = os.environ.get("MAIL_TO", "")
-    mail_cc        = os.environ.get("MAIL_CC", "")
-
-    msg = MIMEMultipart()
-    msg["From"]    = f"Rain Alert Kanagawa <{gmail_user}>"
-    msg["To"]      = mail_to
-    if mail_cc:
-        msg["CC"]  = mail_cc
-    msg["Subject"] = subject
-    msg.attach(MIMEText(body, "plain", "utf-8"))
-
-    all_recipients = [r for r in [mail_to, mail_cc] + BCC_LIST if r]
-
+    payload = {"Text": message}
+    body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
     try:
-        with smtplib.SMTP("smtp.gmail.com", 587) as smtp:
-            smtp.ehlo()
-            smtp.starttls()
-            smtp.login(gmail_user, gmail_password)
-            smtp.sendmail(gmail_user, all_recipients, msg.as_bytes())
-        print(f"メール送信完了 | TO:{mail_to} / CC:{mail_cc} / BCC:{len(BCC_LIST)}社")
+        req = Request(webhook_url, data=body, headers={"Content-Type": "application/json"})
+        with urlopen(req, timeout=10) as resp:
+            result = resp.read().decode()
+        print(f"Slack送信完了: {result}")
         return True
     except Exception as e:
-        print(f"メール送信エラー: {e}")
+        print(f"Slack送信エラー: {e}")
         return False
 
 # ==============================================================
@@ -263,15 +217,17 @@ def main():
     time.sleep(0.5)
 
     # チェック2: Open-Meteo 降水チェック
-    print("--- Open-Meteo 降水チェック (閾値: 20mm/h) ---")
+    print(f"--- Open-Meteo 降水チェック (閾値: {HOURLY_RAIN_THRESHOLD}mm/h) ---")
     for station_name, station_info in STATIONS.items():
         data = fetch_precipitation(station_info["lat"], station_info["lon"])
         exceeds, hourly_mm, max_15min, peak_time, _ = check_rain_hourly(data)
         if exceeds:
             level = (
-                "[猛烈な雨]" if hourly_mm >= 50 else
-                "[激しい雨]" if hourly_mm >= 30 else
-                "[強い雨  ]"
+                "[猛烈な雨    ]" if hourly_mm >= 80 else
+                "[非常に激しい雨]" if hourly_mm >= 50 else
+                "[激しい雨    ]" if hourly_mm >= 30 else
+                "[強い雨      ]" if hourly_mm >= 20 else
+                "[やや強い雨  ]"
             )
             alert_msg = (
                 f"{level} {station_name} ({station_info['area']}): "
@@ -287,10 +243,7 @@ def main():
 
     # 通知判定
     if trigger_alerts:
-        now_str = now_jst.strftime("%m/%d %H:%M")
-        subject = f"【Rain Alert】強雨検知 {now_str}"
-        body    = build_email_body(trigger_alerts, log_only_info)
-        if send_email(subject, body):
+        if send_slack(trigger_alerts, log_only_info):
             update_cooldown()
     else:
         print("全拠点 閾値未満 & 警報なし — 通知なし")
