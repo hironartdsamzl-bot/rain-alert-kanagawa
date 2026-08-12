@@ -28,6 +28,8 @@ jobs:
           GMAIL_APP_PASSWORD: ${{ secrets.GMAIL_APP_PASSWORD }}
           MAIL_TO:            ${{ secrets.MAIL_TO }}
           MAIL_CC:            ${{ secrets.MAIL_CC }}
+          SLACK_WEBHOOK_URL:  ${{ secrets.SLACK_WEBHOOK_URL }}
+
         run: python rain_alert.py
 
       - name: クールダウン状態を保存
