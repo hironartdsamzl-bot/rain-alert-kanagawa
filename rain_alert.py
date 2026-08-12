@@ -55,7 +55,7 @@ JMA_WARNING_CODES = {
 JMA_WARNING_TRIGGER_CODES = {"03", "04", "05", "10", "11", "12"}
 JMA_ADVISORY_CODES        = {"15", "20", "22"}
 
-HOURLY_RAIN_THRESHOLD = 10.0  # mm/h（本番値）
+HOURLY_RAIN_THRESHOLD = 00.0  # mm/h（本番値）
 COOLDOWN_MINUTES      = 10    # 差分なしでも連続投稿を防ぐ最低間隔（差分検知が主制御）
 STATE_FILE            = Path(".rain_state")  # 状態ファイル（クールダウン + 前回拠点状態）
 
@@ -83,14 +83,14 @@ def get_level_emoji(mm: float) -> str:
     return "☁️"
 
 def get_rain_bar(mm: float) -> str:
-    """雨量をカラーブロックバーで表現（10マス、最大50mm/h基準）"""
-    filled = min(10, round(mm / 50 * 10))
+    """雨量をカラーブロックバーで表現（5マス、最大50mm/h基準）"""
+    filled = min(5, round(mm / 50 * 5))
     if mm >= 50:   block = "🟥"
     elif mm >= 30: block = "🟧"
     elif mm >= 20: block = "🟨"
     elif mm >= 10: block = "🟦"
     else:          block = "🟩"
-    return block * filled + "⬜" * (10 - filled)
+    return block * filled + "▫" * (5 - filled)
 
 # ==============================================================
 # 状態管理（ファイルベース）
