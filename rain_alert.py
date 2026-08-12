@@ -55,7 +55,7 @@ JMA_WARNING_CODES = {
 JMA_WARNING_TRIGGER_CODES = {"03", "04", "05", "10", "11", "12"}
 JMA_ADVISORY_CODES        = {"15", "20", "22"}
 
-HOURLY_RAIN_THRESHOLD = 00.0  # mm/h（本番値）
+HOURLY_RAIN_THRESHOLD = 10.0  # mm/h（本番値）
 COOLDOWN_MINUTES      = 10    # 差分なしでも連続投稿を防ぐ最低間隔（差分検知が主制御）
 STATE_FILE            = Path(".rain_state")  # 状態ファイル（クールダウン + 前回拠点状態）
 
@@ -81,6 +81,16 @@ def get_level_emoji(mm: float) -> str:
     if mm >= 5:  return "🌧🌧"
     if mm > 0:   return "🌧"
     return "☁️"
+
+def get_rain_bar(mm: float) -> str:
+    """雨量をカラーブロックバーで表現（10マス、最大50mm/h基準）"""
+    filled = min(10, round(mm / 50 * 10))
+    if mm >= 50:   block = "🟥"
+    elif mm >= 30: block = "🟧"
+    elif mm >= 20: block = "🟨"
+    elif mm >= 10: block = "🟦"
+    else:          block = "🟩"
+    return block * filled + "⬜" * (10 - filled)
 
 # ==============================================================
 # 状態管理（ファイルベース）
@@ -279,10 +289,9 @@ def build_slack_message(diff: dict, all_active: dict,
         lines.append("🆕 *新規検知:*")
         for name, info in diff["new_alerts"]:
             area = STATIONS[name]["area"]
-            emoji = get_level_emoji(info["mm"])
+            bar  = get_rain_bar(info["mm"])
             lines.append(
-                f"{emoji} *{name}* ({area}): {info['mm']}mm/h"
-                f"  _{info['level']}_ （最大15分値: {info['max_15min']}mm）"
+                f"{bar}  *{name}* ({area}): {info['mm']}mm/h  _{info['level']}_"
             )
 
     # レベル変化拠点
@@ -290,11 +299,11 @@ def build_slack_message(diff: dict, all_active: dict,
         lines.append("")
         lines.append("⬆️ *雨が強まった:*")
         for name, curr, prev in diff["intensified"]:
-            area = STATIONS[name]["area"]
-            emoji = get_level_emoji(curr["mm"])
+            area      = STATIONS[name]["area"]
+            bar       = get_rain_bar(curr["mm"])
             direction = "⬆" if curr["mm"] > prev.get("mm", 0) else "⬇"
             lines.append(
-                f"{emoji} *{name}* ({area}): {prev.get('mm', '?')}mm/h"
+                f"{bar}  *{name}* ({area}): {prev.get('mm', '?')}mm/h"
                 f" {direction} {curr['mm']}mm/h  _{curr['level']}_"
             )
 
