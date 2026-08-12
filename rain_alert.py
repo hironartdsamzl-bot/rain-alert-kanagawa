@@ -55,7 +55,7 @@ JMA_WARNING_TRIGGER_CODES = {"03", "04", "05", "10", "11", "12"}
 JMA_ADVISORY_CODES        = {"15", "20", "22"}
 
 # テスト用: 0.0 → 本番時は 10.0 に変更すること
-HOURLY_RAIN_THRESHOLD = 0.0  # mm/h
+HOURLY_RAIN_THRESHOLD = 20.0  # mm/h
 COOLDOWN_MINUTES      = 20
 COOLDOWN_FILE         = Path(".cooldown_state")
 
