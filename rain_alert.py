@@ -53,8 +53,8 @@ JMA_WARNING_CODES = {
 JMA_WARNING_TRIGGER_CODES = {"03", "04", "05", "10", "11", "12"}
 JMA_ADVISORY_CODES        = {"15", "20", "22"}
 
-HOURLY_RAIN_THRESHOLD = 5.0    # mm/h（傘が必要になる雨・バイク配送に支障が出始めるレベル）
-WBGT_THRESHOLD        = 28.0   # ℃（環境省「警戒」基準: 積極的に運動を避けるレベル）
+HOURLY_RAIN_THRESHOLD = 0.0    # mm/h（傘が必要になる雨・バイク配送に支障が出始めるレベル）
+WBGT_THRESHOLD        = 20.0   # ℃（環境省「警戒」基準: 積極的に運動を避けるレベル）
 COOLDOWN_MINUTES      = 10
 STATE_FILE            = Path(".rain_state")
 
