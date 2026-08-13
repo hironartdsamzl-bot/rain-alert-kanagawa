@@ -1,7 +1,7 @@
 """
-Rain Alert Monitor - GitHub Actions版 (差分通知対応)
+Rain & 熱中症 Alert Monitor - GitHub Actions版 (差分通知対応)
 ================================================
-Open-Meteo API + 気象庁API(警報)のダブルチェックで降水を検知し、
+Open-Meteo API + 気象庁API のダブルチェックで降水・熱中症を検知し、
 前回チェックからの「変化」があった拠点のみSlackへ通知する。
 
 実行環境  : GitHub Actions (ubuntu-latest)
@@ -11,8 +11,6 @@ Open-Meteo API + 気象庁API(警報)のダブルチェックで降水を検知�
 
 【必要なGitHub Secrets】
   SLACK_WEBHOOK_URL  : Slack Workflow Builder の Webhook URL
-  GMAIL_USER         : (メール通知用・現在未使用)
-  GMAIL_APP_PASSWORD : (メール通知用・現在未使用)
 """
 
 import json
@@ -55,16 +53,16 @@ JMA_WARNING_CODES = {
 JMA_WARNING_TRIGGER_CODES = {"03", "04", "05", "10", "11", "12"}
 JMA_ADVISORY_CODES        = {"15", "20", "22"}
 
-HOURLY_RAIN_THRESHOLD = 5.0   # mm/h（傘が必要になる雨・バイク配送に支障が出始めるレベル）
-COOLDOWN_MINUTES      = 10    # 差分なしでも連続投稿を防ぐ最低間隔（差分検知が主制御）
-STATE_FILE            = Path(".rain_state")  # 状態ファイル（クールダウン + 前回拠点状態）
+HOURLY_RAIN_THRESHOLD = 5.0    # mm/h（傘が必要になる雨・バイク配送に支障が出始めるレベル）
+WBGT_THRESHOLD        = 28.0   # ℃（環境省「警戒」基準: 積極的に運動を避けるレベル）
+COOLDOWN_MINUTES      = 10
+STATE_FILE            = Path(".rain_state")
 
 # ==============================================================
-# 雨量レベルヘルパー
+# 雨量ヘルパー
 # ==============================================================
 
 def get_rain_level(mm: float) -> str:
-    """気象庁基準の雨量カテゴリ名を返す"""
     if mm >= 80: return "猛烈な雨"
     if mm >= 50: return "非常に激しい雨"
     if mm >= 30: return "激しい雨"
@@ -73,8 +71,7 @@ def get_rain_level(mm: float) -> str:
     if mm > 0:   return "小雨"
     return "雨なし"
 
-def get_level_emoji(mm: float) -> str:
-    """雨量に応じた絵文字を返す"""
+def get_rain_emoji(mm: float) -> str:
     if mm >= 30: return "🚨"
     if mm >= 20: return "⛈⛈"
     if mm >= 10: return "⛈"
@@ -83,13 +80,46 @@ def get_level_emoji(mm: float) -> str:
     return "☁️"
 
 def get_rain_bar(mm: float) -> str:
-    """雨量をカラーブロックバーで表現（5マス、最大50mm/h基準）"""
+    """雨量を5マスのカラーバーで表示（最大50mm/h基準）"""
     filled = min(5, round(mm / 50 * 5))
     if mm >= 50:   block = "🟥"
     elif mm >= 30: block = "🟧"
     elif mm >= 20: block = "🟨"
-    elif mm >= 10: block = "🟦"
+    elif mm >= 5:  block = "🟦"
     else:          block = "🟩"
+    return block * filled + "▫" * (5 - filled)
+
+# ==============================================================
+# 熱中症ヘルパー
+# ==============================================================
+
+def calc_wbgt(temp: float, humidity: float,
+              solar_rad_wm2: float, wind_speed: float) -> float:
+    """
+    WBGT（暑さ指数）を計算する。
+    日本生気象学会推奨式（屋外・日射あり）を使用。
+    参考: https://www.jsb-hp.com/reference_b.html
+    """
+    sr = solar_rad_wm2 * 0.001  # W/m² → kW/m²
+    wbgt = (0.735 * temp + 0.0374 * humidity + 0.00292 * temp * humidity
+            + 7.619 * sr - 4.557 * sr ** 2 - 0.0572 * wind_speed - 4.064)
+    return round(wbgt, 1)
+
+def get_heat_level(wbgt: float) -> str:
+    """環境省の熱中症警戒基準に準拠したレベル名を返す"""
+    if wbgt >= 33: return "危険"
+    if wbgt >= 31: return "厳重警戒"
+    if wbgt >= 28: return "警戒"
+    if wbgt >= 25: return "注意"
+    return "ほぼ安全"
+
+def get_heat_bar(wbgt: float) -> str:
+    """WBGTを5マスのカラーバーで表示（25〜40℃基準）"""
+    filled = min(5, max(0, round((wbgt - 25) / 15 * 5)))
+    if wbgt >= 33:   block = "🟥"
+    elif wbgt >= 31: block = "🟧"
+    elif wbgt >= 28: block = "🟨"
+    else:            block = "🟩"
     return block * filled + "▫" * (5 - filled)
 
 # ==============================================================
@@ -97,91 +127,87 @@ def get_rain_bar(mm: float) -> str:
 # ==============================================================
 
 def load_state() -> dict:
-    """前回チェック時の状態を読み込む"""
     if not STATE_FILE.exists():
-        return {"last_notified": 0, "prev_stations": {}, "prev_jma": []}
+        return {"last_notified": 0, "prev_rain": {}, "prev_heat": {}, "prev_jma": []}
     try:
         return json.loads(STATE_FILE.read_text())
     except Exception:
-        return {"last_notified": 0, "prev_stations": {}, "prev_jma": []}
+        return {"last_notified": 0, "prev_rain": {}, "prev_heat": {}, "prev_jma": []}
 
 
-def save_state(last_notified: float, station_results: dict, jma_active: list):
-    """現在の状態を保存（通知有無に関わらず毎回実行）"""
+def save_state(last_notified: float, rain_results: dict,
+               heat_results: dict, jma_active: list):
     STATE_FILE.write_text(json.dumps({
         "last_notified": last_notified,
-        "last_run": time.time(),
-        "last_run_dt": datetime.now(JST).isoformat(),
-        "prev_stations": station_results,
-        "prev_jma": jma_active,
+        "last_run":      time.time(),
+        "last_run_dt":   datetime.now(JST).isoformat(),
+        "prev_rain":     rain_results,
+        "prev_heat":     heat_results,
+        "prev_jma":      jma_active,
     }, ensure_ascii=False, indent=2))
 
 
 def is_in_cooldown(last_notified: float) -> bool:
-    elapsed_min = (time.time() - last_notified) / 60
-    return elapsed_min < COOLDOWN_MINUTES
+    return (time.time() - last_notified) / 60 < COOLDOWN_MINUTES
 
 # ==============================================================
 # 差分検出
 # ==============================================================
 
-def get_diff(prev_stations: dict, curr_stations: dict,
-             prev_jma: list, curr_jma: list) -> dict:
-    """
-    前回状態と今回状態を比較し、変化を分類して返す。
-
-    戻り値:
-        new_alerts   : 新たに閾値超えになった拠点 [(name, curr_info), ...]
-        intensified  : レベルが上がった拠点        [(name, curr_info, prev_info), ...]
-        weakened     : 閾値を下回った拠点          [(name, prev_info), ...]
-        new_warnings : 新たに発表された気象庁警報  [str, ...]
-        lifted       : 解除された気象庁警報        [str, ...]
-        has_changes  : 何らかの変化があったか (bool)
-    """
+def _diff_stations(prev: dict, curr: dict, threshold_key: str = "exceeds") -> tuple:
+    """拠点状態の差分を (new, intensified, weakened) で返す汎用関数"""
     new_alerts  = []
     intensified = []
     weakened    = []
+    for name, c in curr.items():
+        p = prev.get(name, {})
+        if c.get("exceeds") and not p.get("exceeds"):
+            new_alerts.append((name, c))
+        elif c.get("exceeds") and p.get("exceeds"):
+            if c.get("level") != p.get("level"):
+                intensified.append((name, c, p))
+        elif not c.get("exceeds") and p.get("exceeds"):
+            weakened.append((name, p))
+    return new_alerts, intensified, weakened
 
-    for name, curr in curr_stations.items():
-        prev = prev_stations.get(name, {})
-        curr_exceeds = curr.get("exceeds", False)
-        prev_exceeds = prev.get("exceeds", False)
 
-        if curr_exceeds and not prev_exceeds:
-            # 新規検知
-            new_alerts.append((name, curr))
-        elif curr_exceeds and prev_exceeds:
-            # 両方検知中 → レベル変化をチェック
-            if curr.get("level") != prev.get("level"):
-                intensified.append((name, curr, prev))
-        elif not curr_exceeds and prev_exceeds:
-            # 閾値を下回った（雨が弱まった）
-            weakened.append((name, prev))
+def get_diff(prev_rain: dict, curr_rain: dict,
+             prev_heat: dict, curr_heat: dict,
+             prev_jma: list, curr_jma: list) -> dict:
+    rain_new, rain_up, rain_down = _diff_stations(prev_rain, curr_rain)
+    heat_new, heat_up, heat_down = _diff_stations(prev_heat, curr_heat)
 
     prev_jma_set = set(prev_jma)
     curr_jma_set = set(curr_jma)
     new_warnings = sorted(curr_jma_set - prev_jma_set)
     lifted       = sorted(prev_jma_set - curr_jma_set)
 
-    has_changes = bool(new_alerts or intensified or weakened or new_warnings or lifted)
+    has_changes = bool(rain_new or rain_up or rain_down
+                       or heat_new or heat_up or heat_down
+                       or new_warnings or lifted)
     return {
-        "new_alerts":  new_alerts,
-        "intensified": intensified,
-        "weakened":    weakened,
+        "rain_new":     rain_new,
+        "rain_up":      rain_up,
+        "rain_down":    rain_down,
+        "heat_new":     heat_new,
+        "heat_up":      heat_up,
+        "heat_down":    heat_down,
         "new_warnings": new_warnings,
         "lifted":       lifted,
         "has_changes":  has_changes,
     }
 
 # ==============================================================
-# Open-Meteo 関連
+# データ取得（雨 + 熱中症を1回のAPIコールで取得）
 # ==============================================================
 
-def fetch_precipitation(lat: float, lon: float) -> dict:
+def fetch_weather_data(lat: float, lon: float) -> dict:
+    """Open-Meteo から降水量・気温・湿度・日射・風速を一括取得"""
     url = (
         f"https://api.open-meteo.com/v1/forecast?"
         f"latitude={lat}&longitude={lon}"
         f"&minutely_15=precipitation"
+        f"&current=temperature_2m,relativehumidity_2m,shortwave_radiation,windspeed_10m"
         f"&timezone=Asia/Tokyo"
         f"&forecast_minutely_15=8"
     )
@@ -190,12 +216,11 @@ def fetch_precipitation(lat: float, lon: float) -> dict:
         with urlopen(req, timeout=15) as resp:
             return json.loads(resp.read().decode("utf-8"))
     except Exception as e:
-        print(f"Open-Meteo APIエラー ({lat},{lon}): {e}")
+        print(f"  Open-Meteo APIエラー ({lat},{lon}): {e}")
         return {}
 
 
-def check_rain_hourly(data: dict) -> dict:
-    """降水チェック。拠点状態辞書を返す"""
+def check_rain(data: dict) -> dict:
     if not data or "minutely_15" not in data:
         return {"exceeds": False, "mm": 0.0, "max_15min": 0.0, "peak_time": "", "level": "取得失敗"}
     minutely = data["minutely_15"]
@@ -216,8 +241,26 @@ def check_rain_hourly(data: dict) -> dict:
         "level":     get_rain_level(hourly_total),
     }
 
+
+def check_heat(data: dict) -> dict:
+    if not data or "current" not in data:
+        return {"exceeds": False, "wbgt": 0.0, "temp": 0.0, "humidity": 0, "level": "取得失敗"}
+    curr = data["current"]
+    temp     = curr.get("temperature_2m", 0.0)
+    humidity = curr.get("relativehumidity_2m", 0)
+    solar    = curr.get("shortwave_radiation", 0.0)
+    wind     = curr.get("windspeed_10m", 0.0)
+    wbgt     = calc_wbgt(temp, humidity, solar, wind)
+    return {
+        "exceeds":  wbgt >= WBGT_THRESHOLD,
+        "wbgt":     wbgt,
+        "temp":     round(temp, 1),
+        "humidity": humidity,
+        "level":    get_heat_level(wbgt),
+    }
+
 # ==============================================================
-# 気象庁 警報・注意報 関連
+# 気象庁 警報・注意報
 # ==============================================================
 
 def fetch_jma_warnings() -> dict:
@@ -227,12 +270,11 @@ def fetch_jma_warnings() -> dict:
         with urlopen(req, timeout=15) as resp:
             return json.loads(resp.read().decode("utf-8"))
     except Exception as e:
-        print(f"気象庁警報APIエラー: {e}")
+        print(f"  気象庁警報APIエラー: {e}")
         return {}
 
 
 def check_jma_warnings(data: dict) -> tuple:
-    """(警報アクティブリスト, 注意報リスト) を返す"""
     if not data:
         return [], []
     warning_alerts  = []
@@ -251,7 +293,7 @@ def check_jma_warnings(data: dict) -> tuple:
                 elif w_code in JMA_ADVISORY_CODES:
                     advisory_alerts.append(f"[注意報|{area_name}] {w_name} 発表中")
     except Exception as e:
-        print(f"気象庁データ解析エラー: {e}")
+        print(f"  気象庁データ解析エラー: {e}")
         return [], []
     return warning_alerts, advisory_alerts
 
@@ -259,87 +301,109 @@ def check_jma_warnings(data: dict) -> tuple:
 # Slack 送信
 # ==============================================================
 
-def build_slack_message(diff: dict, all_active: dict,
+def build_slack_message(diff: dict, all_rain: dict, all_heat: dict,
                         curr_jma_active: list, now_str: str) -> str:
-    """差分情報をもとにSlackメッセージを組み立てる"""
 
-    # ヘッダー絵文字: アクティブ拠点の最大雨量から決定
-    max_mm = max((v["mm"] for v in all_active.values() if v.get("exceeds")), default=0)
-    header_emoji = get_level_emoji(max_mm)
+    # ヘッダー: 雨・熱中症の両方が活性なら両方の絵文字
+    has_rain_alert = any(v["exceeds"] for v in all_rain.values())
+    has_heat_alert = any(v["exceeds"] for v in all_heat.values())
+    max_rain_mm    = max((v["mm"]   for v in all_rain.values() if v["exceeds"]), default=0)
+    max_wbgt       = max((v["wbgt"] for v in all_heat.values() if v["exceeds"]), default=0)
 
-    lines = [f"{header_emoji} *【Rain Alert — 状況変化】{now_str}*"]
+    if has_heat_alert and has_rain_alert:
+        header_emoji = f"🌡️{get_rain_emoji(max_rain_mm)}"
+        title = "Rain & 熱中症 アラート"
+    elif has_heat_alert:
+        header_emoji = "🌡️" if max_wbgt < 33 else "🌡️🚨"
+        title = "熱中症 アラート"
+    else:
+        header_emoji = get_rain_emoji(max_rain_mm)
+        title = "Rain Alert"
 
-    # 気象庁警報（新規）
+    lines = [f"{header_emoji} *【{title} — 状況変化】{now_str}*"]
+
+    # 気象庁警報
     if diff["new_warnings"]:
-        lines.append("")
-        lines.append("🚨 *気象庁 警報 新規発表:*")
+        lines += ["", "🚨 *気象庁 警報 新規発表:*"]
         for w in diff["new_warnings"]:
             lines.append(f"• {w}")
-
-    # 気象庁警報（解除）
     if diff["lifted"]:
-        lines.append("")
-        lines.append("✅ *気象庁 警報 解除:*")
+        lines += ["", "✅ *気象庁 警報 解除:*"]
         for w in diff["lifted"]:
             lines.append(f"• {w}")
 
-    # 新規検知拠点
-    if diff["new_alerts"]:
-        lines.append("")
-        lines.append("🆕 *新規検知:*")
-        for name, info in diff["new_alerts"]:
-            area = STATIONS[name]["area"]
-            bar  = get_rain_bar(info["mm"])
+    # 熱中症セクション
+    if diff["heat_new"]:
+        lines += ["", "🌡️ *熱中症 新規警戒:*"]
+        for name, info in diff["heat_new"]:
+            bar = get_heat_bar(info["wbgt"])
             lines.append(
-                f"{bar}  *{name}* ({area}): {info['mm']}mm/h  _{info['level']}_"
+                f"{bar}  *{name}* ({STATIONS[name]['area']}): "
+                f"WBGT {info['wbgt']}℃  _{info['level']}_"
+                f"  （気温 {info['temp']}℃ / 湿度 {info['humidity']}%）"
+            )
+    if diff["heat_up"]:
+        lines += ["", "⬆️ *熱中症危険度が上がった:*"]
+        for name, curr, prev in diff["heat_up"]:
+            bar = get_heat_bar(curr["wbgt"])
+            direction = "⬆" if curr["wbgt"] > prev.get("wbgt", 0) else "⬇"
+            lines.append(
+                f"{bar}  *{name}* ({STATIONS[name]['area']}): "
+                f"WBGT {prev.get('wbgt','?')}℃ {direction} {curr['wbgt']}℃  _{curr['level']}_"
+            )
+    if diff["heat_down"]:
+        lines += ["", "❄️ *熱中症危険度が下がった:*"]
+        for name, prev in diff["heat_down"]:
+            lines.append(
+                f"• *{name}* ({STATIONS[name]['area']}): 警戒レベル以下"
+                f"  （前回: WBGT {prev.get('wbgt','?')}℃）"
             )
 
-    # レベル変化拠点
-    if diff["intensified"]:
-        lines.append("")
-        lines.append("⬆️ *雨が強まった:*")
-        for name, curr, prev in diff["intensified"]:
-            area      = STATIONS[name]["area"]
-            bar       = get_rain_bar(curr["mm"])
-            direction = "⬆" if curr["mm"] > prev.get("mm", 0) else "⬇"
+    # 雨セクション
+    if diff["rain_new"]:
+        lines += ["", "🆕 *雨 新規検知:*"]
+        for name, info in diff["rain_new"]:
+            bar = get_rain_bar(info["mm"])
             lines.append(
-                f"{bar}  *{name}* ({area}): {prev.get('mm', '?')}mm/h"
-                f" {direction} {curr['mm']}mm/h  _{curr['level']}_"
+                f"{bar}  *{name}* ({STATIONS[name]['area']}): "
+                f"{info['mm']}mm/h  _{info['level']}_"
+            )
+    if diff["rain_up"]:
+        lines += ["", "⬆️ *雨が強まった:*"]
+        for name, curr, prev in diff["rain_up"]:
+            bar = get_rain_bar(curr["mm"])
+            d = "⬆" if curr["mm"] > prev.get("mm", 0) else "⬇"
+            lines.append(
+                f"{bar}  *{name}* ({STATIONS[name]['area']}): "
+                f"{prev.get('mm','?')}mm/h {d} {curr['mm']}mm/h  _{curr['level']}_"
+            )
+    if diff["rain_down"]:
+        lines += ["", "🌤 *雨が弱まりました:*"]
+        for name, prev in diff["rain_down"]:
+            lines.append(
+                f"• *{name}* ({STATIONS[name]['area']}): 閾値以下"
+                f"  （前回: {prev.get('mm','?')}mm/h）"
             )
 
-    # 弱まった拠点
-    if diff["weakened"]:
-        lines.append("")
-        lines.append("🌤 *雨が弱まりました:*")
-        for name, prev in diff["weakened"]:
-            area = STATIONS[name]["area"]
-            lines.append(
-                f"• *{name}* ({area}): 閾値以下"
-                f" （前回: {prev.get('mm', '?')}mm/h）"
-            )
+    # サマリー
+    heat_active = [n for n, v in all_heat.items() if v["exceeds"]]
+    rain_active = [n for n, v in all_rain.items() if v["exceeds"]]
+    if heat_active:
+        lines += ["", f"🌡️ *熱中症アクティブ {len(heat_active)}拠点:* {' / '.join(heat_active)}"]
+    if rain_active:
+        lines += ["", f"🌧 *雨アクティブ {len(rain_active)}拠点:* {' / '.join(rain_active)}"]
+    if not heat_active and not rain_active:
+        lines += ["", "📋 *現在: 全拠点 閾値以下*"]
 
-    # 現在アクティブ拠点サマリー
-    active_names = [n for n, v in all_active.items() if v.get("exceeds")]
-    if active_names:
-        lines.append("")
-        lines.append(f"📋 *現在アクティブ {len(active_names)}拠点:* {' / '.join(active_names)}")
-    else:
-        lines.append("")
-        lines.append("📋 *現在: 全拠点 閾値以下*")
-
-    lines.append("")
-    lines.append("_Open-Meteo / 気象庁データに基づく自動通知_")
-
+    lines += ["", "_Open-Meteo / 気象庁データに基づく自動通知_"]
     return "\n".join(lines)
 
 
 def send_slack(message: str) -> bool:
-    """Slack Workflow Builder Webhook で通知を送る"""
     webhook_url = os.environ.get("SLACK_WEBHOOK_URL", "")
     if not webhook_url:
-        print("SLACK_WEBHOOK_URL 未設定 — Slack通知スキップ")
+        print("  SLACK_WEBHOOK_URL 未設定 — Slack通知スキップ")
         return False
-
     payload = {"Text": message}
     body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
     try:
@@ -347,10 +411,10 @@ def send_slack(message: str) -> bool:
                       headers={"Content-Type": "application/json"})
         with urlopen(req, timeout=10) as resp:
             result = resp.read().decode()
-        print(f"Slack送信完了: {result}")
+        print(f"  Slack送信完了: {result}")
         return True
     except Exception as e:
-        print(f"Slack送信エラー: {e}")
+        print(f"  Slack送信エラー: {e}")
         return False
 
 # ==============================================================
@@ -359,25 +423,25 @@ def send_slack(message: str) -> bool:
 
 def main():
     now_jst = datetime.now(JST)
-    print(f"Rain Alert 開始 | {now_jst.strftime('%Y-%m-%d %H:%M')} JST")
+    print(f"Rain & 熱中症 Alert 開始 | {now_jst.strftime('%Y-%m-%d %H:%M')} JST")
 
-    # 稼働時間チェック（07:00-20:00 JST）
     if now_jst.hour < 7 or now_jst.hour >= 20:
         print("稼働時間外 — スキップ")
         return
 
     # 前回状態を読み込む
-    state = load_state()
-    last_notified  = state.get("last_notified", 0)
-    prev_stations  = state.get("prev_stations", {})
-    prev_jma       = state.get("prev_jma", [])
+    state         = load_state()
+    last_notified = state.get("last_notified", 0)
+    prev_rain     = state.get("prev_rain", {})
+    prev_heat     = state.get("prev_heat", {})
+    prev_jma      = state.get("prev_jma", [])
 
     # ----------------------------------------------------------
-    # チェック1: 気象庁 警報・注意報
+    # 気象庁 警報・注意報
     # ----------------------------------------------------------
     print("--- 気象庁 警報・注意報チェック ---")
-    warning_data  = fetch_jma_warnings()
-    curr_jma_active, curr_jma_advisory = check_jma_warnings(warning_data)
+    warning_data = fetch_jma_warnings()
+    curr_jma_active, _ = check_jma_warnings(warning_data)
     if curr_jma_active:
         for w in curr_jma_active:
             print(f"  警報検知: {w}")
@@ -386,60 +450,54 @@ def main():
     time.sleep(0.5)
 
     # ----------------------------------------------------------
-    # チェック2: Open-Meteo 降水チェック
+    # 各拠点 降水 + WBGT チェック（1拠点1回のAPIコール）
     # ----------------------------------------------------------
-    print(f"--- Open-Meteo 降水チェック (閾値: {HOURLY_RAIN_THRESHOLD}mm/h) ---")
-    curr_stations = {}
-    for station_name, station_info in STATIONS.items():
-        data   = fetch_precipitation(station_info["lat"], station_info["lon"])
-        result = check_rain_hourly(data)
-        curr_stations[station_name] = result
-        status = "検知" if result["exceeds"] else "閾値未満"
-        print(f"  {status}: {station_name} {result['mm']:.1f}mm/h [{result['level']}]")
+    print(f"--- 拠点チェック (雨閾値:{HOURLY_RAIN_THRESHOLD}mm/h / WBGT閾値:{WBGT_THRESHOLD}℃) ---")
+    curr_rain = {}
+    curr_heat = {}
+    for name, info in STATIONS.items():
+        data = fetch_weather_data(info["lat"], info["lon"])
+        rain = check_rain(data)
+        heat = check_heat(data)
+        curr_rain[name] = rain
+        curr_heat[name] = heat
+        rain_status = "雨検知" if rain["exceeds"] else "雨なし"
+        heat_status = f"WBGT{heat['wbgt']}℃[{heat['level']}]"
+        print(f"  {name}: {rain_status}({rain['mm']}mm/h)  {heat_status}")
         time.sleep(0.3)
 
     # ----------------------------------------------------------
     # 差分検出
     # ----------------------------------------------------------
-    all_jma_active = curr_jma_active  # 警報は注意報を含まない（通知対象のみ）
-    diff = get_diff(prev_stations, curr_stations, prev_jma, all_jma_active)
-
-    print(f"--- 差分チェック: 変化あり={diff['has_changes']} ---")
-    if diff["new_alerts"]:
-        print(f"  新規検知: {[n for n, _ in diff['new_alerts']]}")
-    if diff["intensified"]:
-        print(f"  レベル変化: {[n for n, _, _ in diff['intensified']]}")
-    if diff["weakened"]:
-        print(f"  弱まった: {[n for n, _ in diff['weakened']]}")
-    if diff["new_warnings"]:
-        print(f"  新規警報: {diff['new_warnings']}")
-    if diff["lifted"]:
-        print(f"  解除警報: {diff['lifted']}")
+    diff = get_diff(prev_rain, curr_rain, prev_heat, curr_heat, prev_jma, curr_jma_active)
+    print(f"--- 差分: 変化あり={diff['has_changes']} ---")
+    if diff["heat_new"]:  print(f"  熱中症新規: {[n for n,_ in diff['heat_new']]}")
+    if diff["heat_up"]:   print(f"  熱中症上昇: {[n for n,_,_ in diff['heat_up']]}")
+    if diff["heat_down"]: print(f"  熱中症低下: {[n for n,_ in diff['heat_down']]}")
+    if diff["rain_new"]:  print(f"  雨新規: {[n for n,_ in diff['rain_new']]}")
+    if diff["rain_up"]:   print(f"  雨強化: {[n for n,_,_ in diff['rain_up']]}")
+    if diff["rain_down"]: print(f"  雨弱化: {[n for n,_ in diff['rain_down']]}")
 
     # ----------------------------------------------------------
     # 通知判定
     # ----------------------------------------------------------
-    should_notify = diff["has_changes"] and not is_in_cooldown(last_notified)
-
     if not diff["has_changes"]:
-        active_count = sum(1 for v in curr_stations.values() if v["exceeds"])
-        print(f"変化なし — 通知スキップ（現在アクティブ: {active_count}拠点）")
+        rain_cnt = sum(1 for v in curr_rain.values() if v["exceeds"])
+        heat_cnt = sum(1 for v in curr_heat.values() if v["exceeds"])
+        print(f"変化なし — スキップ（雨:{rain_cnt}拠点 / 熱中症:{heat_cnt}拠点）")
     elif is_in_cooldown(last_notified):
         print(f"クールダウン中（{COOLDOWN_MINUTES}分以内に通知済み）— スキップ")
     else:
         now_str = now_jst.strftime("%m/%d %H:%M")
-        message = build_slack_message(diff, curr_stations, all_jma_active, now_str)
+        message = build_slack_message(diff, curr_rain, curr_heat, curr_jma_active, now_str)
         print("--- 送信メッセージ ---")
         print(message)
         print("---------------------")
         if send_slack(message):
             last_notified = time.time()
 
-    # ----------------------------------------------------------
-    # 状態を保存（毎回。差分検出の基準として次回実行で使用）
-    # ----------------------------------------------------------
-    save_state(last_notified, curr_stations, all_jma_active)
-    print("Rain Alert 完了")
+    save_state(last_notified, curr_rain, curr_heat, curr_jma_active)
+    print("完了")
 
 
 if __name__ == "__main__":
